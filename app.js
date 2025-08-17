@@ -6,7 +6,8 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(express.json());
 
-// --- Start of AdvancedTaiXiuPredictor Class ---
+// --- START OF PREDICTION MODELS ---
+// Các mô hình con đã được mô phỏng.
 class DeepSequencePredictor {
     async analyze(data) {
         const history = data.historical.map(item => item.ket_qua);
@@ -18,7 +19,6 @@ class DeepSequencePredictor {
         let confidence = 85;
         let explanation = "Phân tích chuỗi: Mô hình phát hiện xu hướng bệt hoặc đảo dựa trên 5 phiên gần nhất.";
 
-        // Advanced pattern detection
         const taiCount = history.slice(-10).filter(x => x === 'Tài').length;
         const xiuCount = 10 - taiCount;
         const isBetTai = lastSequence.includes('TTT');
@@ -162,7 +162,7 @@ class AdvancedTaiXiuPredictor {
             phien: this.historicalData[0].phien + 1,
             du_doan: finalPrediction,
             do_tin_cay: confidence,
-            actual: null // Will be updated when actual result is available
+            actual: null
         });
 
         return {
@@ -234,21 +234,28 @@ class AdvancedTaiXiuPredictor {
 
 const advancedPredictor = new AdvancedTaiXiuPredictor();
 
-// Process provided document data
-const processDocumentData = (data) => {
+// Process data from the external API
+const processApiData = (data) => {
+    // API gốc trả về mảng các đối tượng, mỗi đối tượng có thuộc tính "ket_qua" và "tong"
     return data.map(item => ({
         phien: item.session,
         tong: item.total,
         ket_qua: item.result,
-        xuc_xac: [item.dice]
+        xuc_xac: item.dice
     }));
 };
 
 // API Routes
 app.get('/api/taixiu/predict', async (req, res) => {
     try {
-        const documentData = JSON.parse(`[${documentDataString}]`); // Replace with actual document data
-        const processedData = processDocumentData(documentData);
+        const response = await axios.get('https://fullsrc-daynesun.onrender.com/api/taixiu/history');
+        const historyData = response.data;
+        
+        if (!historyData || historyData.length === 0) {
+            return res.status(500).json({ error: "Không thể lấy dữ liệu lịch sử từ API gốc." });
+        }
+
+        const processedData = processApiData(historyData);
         await advancedPredictor.updateData(processedData);
 
         const lastSession = processedData[0];
@@ -258,7 +265,7 @@ app.get('/api/taixiu/predict', async (req, res) => {
         const ket_qua = lastSession.ket_qua;
         const phien_sau = phien + 1;
 
-        const predictionResult = await advancedPredictor.predict(0); // No minimum records required
+        const predictionResult = await advancedPredictor.predict(100); // Yêu cầu ít nhất 100 bản ghi cho dự đoán
 
         const finalResult = {
             phien,
@@ -291,8 +298,14 @@ app.get('/api/taixiu/history', async (req, res) => {
 
 app.get('/api/taixiu/premium', async (req, res) => {
     try {
-        const documentData = JSON.parse(`[${documentDataString}]`).slice(0, 100); // Replace with actual document data
-        const processedData = processDocumentData(documentData);
+        const response = await axios.get('https://fullsrc-daynesun.onrender.com/api/taixiu/history');
+        const historyData = response.data;
+
+        if (!historyData || historyData.length < 50) {
+            return res.status(500).json({ error: "Không đủ dữ liệu cho phân tích premium. Cần ít nhất 50 bản ghi." });
+        }
+        
+        const processedData = processApiData(historyData);
         await advancedPredictor.updateData(processedData);
 
         const lastSession = processedData[0];
