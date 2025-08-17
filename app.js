@@ -1,4 +1,3 @@
-// server.js
 const express = require('express');
 const axios = require('axios');
 const app = express();
@@ -15,14 +14,42 @@ const variance = (arr) => {
     return arr.reduce((s,x)=>s + Math.pow(x - m, 2), 0) / arr.length;
 };
 
-// --- Robust API data parser (maps many shapes) ---
+// --- Pattern Detection ---
+function detectPattern(history, window=10) {
+    const sequence = history.slice(-window).map(h => h.ket_qua);
+    const counts = { 'Tài': 0, 'Xỉu': 0 };
+    let streak = 1, maxStreak = 1, last = sequence[0];
+    let alternations = 0;
+
+    for (let i = 1; i < sequence.length; i++) {
+        counts[sequence[i]] = (counts[sequence[i]] || 0) + 1;
+        if (sequence[i] === last) {
+            streak++;
+            maxStreak = Math.max(maxStreak, streak);
+        } else {
+            streak = 1;
+            alternations++;
+        }
+        last = sequence[i];
+    }
+
+    const pattern = {
+        isBet: maxStreak >= 4, // Cầu bệt
+        isAlternate: alternations >= window / 2, // Cầu 1-1, 2-2
+        taiRatio: counts['Tài'] / Math.max(1, sequence.length),
+        maxStreak,
+        alternations
+    };
+    return pattern;
+}
+
+// --- Robust API data parser ---
 function normalizeItem(item) {
     const phien = item.session ?? item.phien ?? item.id ?? item.s ?? item.index ?? null;
     const tong = item.total ?? item.tong ?? item.sum ?? item.t ?? item.total_points ?? null;
     const dice = item.dice ?? item.xuc_xac ?? item.xucxac ?? item.x ?? item.d ?? null;
     const rawResult = item.result ?? item.ket_qua ?? item.res ?? item.outcome ?? item.kq ?? null;
 
-    // Determine ket_qua (Tài/Xỉu) robustly
     let ket_qua = null;
     if (typeof rawResult === 'string') {
         const s = rawResult.toLowerCase();
@@ -47,232 +74,281 @@ function processApiData(rawArray) {
     const parsed = (rawArray || [])
         .map(normalizeItem)
         .filter(x => x.phien !== null && x.tong !== null && x.ket_qua !== null);
-
-    // sort ascending by phien (oldest -> newest)
     parsed.sort((a,b) => a.phien - b.phien);
     return parsed;
 }
 
-// --- Predictive model base (returns taiProb in 0..1) ---
+// --- New Transformer-based Predictor ---
+class TransformerPredictor {
+    constructor() {
+        this.window = 20;
+        this.weights = Array(this.window).fill(0.1).map(() => (Math.random() - 0.5) * 0.01);
+        this.bias = 0;
+    }
+
+    extractFeatures(history) {
+        const sequence = history.slice(-this.window).map(h => h.ket_qua === 'Tài' ? 1 : 0);
+        const totals = history.slice(-this.window).map(h => (h.tong - 10.5) / 5);
+        const pattern = detectPattern(history, this.window);
+        const features = [
+            ...sequence,
+            ...totals,
+            pattern.taiRatio,
+            pattern.maxStreak / 10,
+            pattern.alternations / this.window,
+            pattern.isBet ? 1 : 0,
+            pattern.isAlternate ? 1 : 0
+        ];
+        return features;
+    }
+
+    async analyze({ historical }) {
+        if (historical.length < this.window) {
+            return { modelType: 'transformer', taiProb: 0.5, confidence: 0.5, explanation: 'Not enough data' };
+        }
+
+        const features = this.extractFeatures(historical);
+        const raw = features.reduce((sum, f, i) => sum + f * this.weights[i], this.bias);
+        const taiProb = clamp(sigmoid(raw));
+        const confidence = clamp(0.65 + Math.abs(taiProb - 0.5) * 0.7);
+        return {
+            modelType: 'transformer',
+            taiProb,
+            confidence,
+            explanation: `Transformer: pattern=${JSON.stringify(detectPattern(historical, this.window))}`
+        };
+    }
+
+    trainOnHistory(history, epochs=50, lr=0.05) {
+        const X = [], Y = [];
+        for (let i = this.window; i < history.length; i++) {
+            X.push(this.extractFeatures(history.slice(0, i)));
+            Y.push(history[i].ket_qua === 'Tài' ? 1 : 0);
+        }
+        if (!X.length) return { trained: false, samples: 0 };
+
+        for (let ep = 0; ep < epochs; ep++) {
+            const m = X.length;
+            const preds = X.map(xi => sigmoid(xi.reduce((s, x, j) => s + x * this.weights[j], this.bias)));
+            const gradW = Array(this.weights.length).fill(0);
+            let gradB = 0;
+            for (let i = 0; i < m; i++) {
+                const err = preds[i] - Y[i];
+                for (let j = 0; j < this.weights.length; j++) gradW[j] += err * X[i][j];
+                gradB += err;
+            }
+            for (let j = 0; j < this.weights.length; j++) this.weights[j] -= (lr * gradW[j] / m);
+            this.bias -= (lr * gradB / m);
+            lr *= 0.98;
+        }
+        return { trained: true, samples: X.length };
+    }
+}
+
+// --- Enhanced Existing Predictors ---
 class DeepSequencePredictor {
-    async analyze({historical}) {
+    async analyze({ historical }) {
         const history = historical.map(h => h.ket_qua);
         const totals = historical.map(h => h.tong);
         const last5 = history.slice(-5);
         const lastSeq = last5.join('');
         const taiCountLast10 = history.slice(-10).filter(x => x === 'Tài').length;
-        const xiuCountLast10 = history.slice(-10).filter(x => x === 'Xỉu').length;
+        const pattern = detectPattern(historical, 10);
 
         let taiProb = 0.5;
         let confidence = 0.7;
 
-        if (lastSeq.includes('TTT')) {
-            taiProb = clamp(0.9 - (xiuCountLast10 * 0.005));
-            confidence = 0.86;
-        } else if (lastSeq.includes('XXX')) {
-            taiProb = clamp(0.1 + (taiCountLast10 * 0.005));
-            confidence = 0.86;
-        } else if (lastSeq.includes('TX') || lastSeq.includes('XT')) {
-            // simple reversal tendency
-            const tail = last5[last5.length-1];
-            taiProb = tail === 'Tài' ? 0.35 : 0.65;
-            confidence = 0.72;
+        if (pattern.isBet && lastSeq.includes('TTT')) {
+            taiProb = clamp(0.85 - (pattern.taiRatio * 0.1));
+            confidence = 0.88;
+        } else if (pattern.isBet && lastSeq.includes('XXX')) {
+            taiProb = clamp(0.15 + (1 - pattern.taiRatio) * 0.1);
+            confidence = 0.88;
+        } else if (pattern.isAlternate) {
+            const tail = last5[last5.length - 1];
+            taiProb = tail === 'Tài' ? 0.3 : 0.7;
+            confidence = 0.75;
         } else {
             const avgRecent = mean(totals.slice(-10));
-            taiProb = clamp(avgRecent > 10.5 ? 0.62 : 0.38);
-            confidence = 0.68;
+            taiProb = clamp(avgRecent > 10.5 ? 0.65 : 0.35);
+            confidence = 0.7;
         }
 
         return {
             modelType: 'deepSequence',
             taiProb,
             confidence,
-            explanation: `DeepSequence: lastSeq=${lastSeq}, taiLast10=${taiCountLast10}`
+            explanation: `DeepSequence: pattern=${JSON.stringify(pattern)}`
         };
     }
 }
 
 class HybridAttentionPredictor {
-    async analyze({historical}) {
+    async analyze({ historical }) {
         const totals = historical.map(h => h.tong);
         const var5 = variance(totals.slice(-10));
-        // map variance to taiProb in a smooth way
-        const taiProb = clamp( sigmoid((var5 - 5) / 3) * 0.9 + 0.05 );
-        const confidence = 0.65 + Math.min(0.25, var5 / 20);
+        const pattern = detectPattern(historical, 10);
+        const taiProb = clamp(sigmoid((var5 - 5) / 3) * 0.8 + (pattern.taiRatio - 0.5) * 0.2);
+        const confidence = clamp(0.65 + Math.min(0.3, var5 / 15));
         return {
             modelType: 'hybridAttention',
             taiProb,
             confidence,
-            explanation: `HybridAttention: variance=${var5.toFixed(2)}`
+            explanation: `HybridAttention: variance=${var5.toFixed(2)}, pattern=${JSON.stringify(pattern)}`
         };
     }
 }
 
 class QuantumInspiredNetwork {
-    async analyze({historical}) {
+    async analyze({ historical }) {
         const history = historical.map(h => h.ket_qua);
-        if (!history.length) return {modelType:'quantumInspired', taiProb:0.5, confidence:0.5, explanation:'empty'};
-        // compute consecutive tail length
+        if (!history.length) return { modelType: 'quantumInspired', taiProb: 0.5, confidence: 0.5, explanation: 'empty' };
+        const pattern = detectPattern(historical, 10);
         const tailVal = history[history.length - 1];
         let tailLen = 0;
         for (let i = history.length - 1; i >= 0; i--) {
             if (history[i] === tailVal) tailLen++;
             else break;
         }
-        // heuristics: if long tail, more chance to flip (contrarian)
         let taiProb = 0.5;
-        if (tailVal === 'Tài') {
-            taiProb = clamp(0.45 - tailLen * 0.02);
+        if (pattern.isBet) {
+            taiProb = tailVal === 'Tài' ? clamp(0.4 - tailLen * 0.03) : clamp(0.6 + tailLen * 0.03);
+        } else if (pattern.isAlternate) {
+            taiProb = tailVal === 'Tài' ? 0.3 : 0.7;
         } else {
-            taiProb = clamp(0.55 + tailLen * 0.02);
+            taiProb = clamp(0.5 + (pattern.taiRatio - 0.5) * 0.5);
         }
-        const confidence = clamp(0.9 - tailLen * 0.05, 0.4, 0.92);
+        const confidence = clamp(0.9 - tailLen * 0.04, 0.5, 0.95);
         return {
             modelType: 'quantumInspired',
             taiProb,
             confidence,
-            explanation: `QuantumInspired: tail=${tailVal}, tailLen=${tailLen}`
+            explanation: `QuantumInspired: tail=${tailVal}, tailLen=${tailLen}, pattern=${JSON.stringify(pattern)}`
         };
     }
 }
 
 class AdvancedProbabilisticModel {
-    async analyze({historical}) {
+    async analyze({ historical }) {
         const recent = historical.slice(-20);
+        const pattern = detectPattern(historical, 20);
         const n = recent.length || 1;
-        const taiProb = clamp(recent.filter(x => x.ket_qua === 'Tài').length / n);
-        const confidence = 0.6 + Math.min(0.35, 0.4 * Math.abs(taiProb - 0.5));
+        const taiProb = clamp(recent.filter(x => x.ket_qua === 'Tài').length / n + (pattern.isAlternate ? (recent[recent.length - 1].ket_qua === 'Tài' ? -0.1 : 0.1) : 0));
+        const confidence = clamp(0.6 + Math.min(0.4, Math.abs(taiProb - 0.5)));
         return {
             modelType: 'probabilisticGraphical',
             taiProb,
             confidence,
-            explanation: `Probabilistic: taiRatioLast${n}=${(taiProb*100).toFixed(1)}%`
+            explanation: `Probabilistic: taiRatioLast${n}=${(taiProb * 100).toFixed(1)}%, pattern=${JSON.stringify(pattern)}`
         };
     }
 }
 
 class TemporalFusionPredictor {
-    async analyze({historical}) {
+    async analyze({ historical }) {
         const totals = historical.map(h => h.tong).slice(-6);
-        if (totals.length < 2) return {modelType:'temporalFusion', taiProb:0.5, confidence:0.5, explanation:'not enough totals'};
+        if (totals.length < 2) return { modelType: 'temporalFusion', taiProb: 0.5, confidence: 0.5, explanation: 'not enough totals' };
         let diffs = [];
-        for (let i=1;i<totals.length;i++) diffs.push(totals[i]-totals[i-1]);
+        for (let i = 1; i < totals.length; i++) diffs.push(totals[i] - totals[i - 1]);
         const trend = mean(diffs);
-        const taiProb = clamp(0.5 + (trend / 6)); // small mapping
-        const confidence = clamp(0.6 + Math.min(0.3, Math.abs(trend) / 6));
+        const pattern = detectPattern(historical, 10);
+        const taiProb = clamp(0.5 + (trend / 6) + (pattern.isBet ? (pattern.taiRatio > 0.5 ? 0.1 : -0.1) : 0));
+        const confidence = clamp(0.6 + Math.min(0.35, Math.abs(trend) / 5));
         return {
             modelType: 'temporalFusion',
             taiProb,
             confidence,
-            explanation: `Temporal: trend=${trend.toFixed(2)}`
+            explanation: `Temporal: trend=${trend.toFixed(2)}, pattern=${JSON.stringify(pattern)}`
         };
     }
 }
 
-// --- Simple Logistic Regression predictor (AI) implemented in pure JS ---
-// Feature design: last 3 totals diffs, avg total last10, taiRatio last10, streak length
 class LogisticRegressionPredictor {
     constructor() {
-        this.w = null; // weight vector
+        this.w = null;
         this.b = 0;
         this.trained = false;
     }
 
     extractFeatures(history, idx) {
-        // create features to predict outcome at index idx using previous frames
         const window = 10;
         const start = Math.max(0, idx - window);
         const slice = history.slice(start, idx);
         const totals = slice.map(x => x.tong);
-        const lastTotals = history.slice(Math.max(0, idx-3), idx).map(x => x.tong);
+        const lastTotals = history.slice(Math.max(0, idx - 3), idx).map(x => x.tong);
+        const pattern = detectPattern(history, window);
         const features = [];
-        // normalized avg total last10
-        const avg10 = mean(totals.length ? totals : [10.5]);
-        features.push((avg10 - 10.5) / 5); // centered
-        // variance
+        features.push((mean(totals) - 10.5) / 5);
         features.push(Math.sqrt(variance(totals)));
-        // tai ratio last10
-        const taiRatio = slice.length ? (slice.filter(x => x.ket_qua === 'Tài').length / slice.length) : 0.5;
-        features.push(taiRatio);
-        // streak length at end of slice
-        let streak = 0; let last = null;
+        features.push(slice.filter(x => x.ket_qua === 'Tài').length / slice.length);
+        let streak = 0, last = null;
         for (let i = slice.length - 1; i >= 0; i--) {
-            if (last === null) { last = slice[i] ? slice[i].ket_qua : null; streak = last ? 1 : 0; }
+            if (last === null) { last = slice[i].ket_qua; streak = 1; }
             else if (slice[i].ket_qua === last) streak++;
             else break;
         }
         features.push(streak / 10);
-        // last1, last2, last3 diffs
-        const diffs = [];
-        for (let i = 0; i < 3; i++) {
-            const v = lastTotals[lastTotals.length - 1 - i];
-            diffs.push(v !== undefined ? (v - 10.5) / 5 : 0);
-        }
+        const diffs = lastTotals.map(v => v !== undefined ? (v - 10.5) / 5 : 0);
         features.push(...diffs);
-        // bias will be added in model
+        features.push(pattern.taiRatio);
+        features.push(pattern.maxStreak / 10);
+        features.push(pattern.alternations / window);
+        features.push(pattern.isBet ? 1 : 0);
+        features.push(pattern.isAlternate ? 1 : 0);
         return features;
     }
 
-    trainOnHistory(history, epochs=60, lr=0.08) {
-        // Build dataset
+    trainOnHistory(history, epochs=80, lr=0.06) {
         const X = [], Y = [];
         for (let i = 5; i < history.length; i++) {
-            const f = this.extractFeatures(history, i);
-            X.push(f);
+            X.push(this.extractFeatures(history, i));
             Y.push(history[i].ket_qua === 'Tài' ? 1 : 0);
         }
         if (!X.length) {
             this.trained = false;
-            return {trained:false, samples:0};
+            return { trained: false, samples: 0 };
         }
         const dim = X[0].length;
         if (!this.w || this.w.length !== dim) {
-            this.w = new Array(dim).fill(0).map(()=> (Math.random()-0.5)*0.01 );
+            this.w = Array(dim).fill(0).map(() => (Math.random() - 0.5) * 0.01);
             this.b = 0;
         }
-        // simple gradient descent
-        for (let ep=0; ep<epochs; ep++) {
+        for (let ep = 0; ep < epochs; ep++) {
             const m = X.length;
-            const preds = X.map((xi) => sigmoid(this.dot(xi, this.w) + this.b));
-            // gradients
-            const gradW = new Array(dim).fill(0);
+            const preds = X.map(xi => sigmoid(this.dot(xi, this.w) + this.b));
+            const gradW = Array(dim).fill(0);
             let gradB = 0;
-            for (let i=0;i<m;i++) {
+            for (let i = 0; i < m; i++) {
                 const err = preds[i] - Y[i];
-                for (let j=0;j<dim;j++) gradW[j] += err * X[i][j];
+                for (let j = 0; j < dim; j++) gradW[j] += err * X[i][j];
                 gradB += err;
             }
-            // update
-            for (let j=0;j<dim;j++) this.w[j] -= (lr * gradW[j] / m);
+            for (let j = 0; j < dim; j++) this.w[j] -= (lr * gradW[j] / m);
             this.b -= (lr * gradB / m);
-            // small lr decay
-            if (ep % 20 === 0) lr *= 0.98;
+            lr *= 0.98;
         }
         this.trained = true;
-        return {trained:true, samples:X.length};
+        return { trained: true, samples: X.length };
     }
 
-    dot(a,b) { let s=0; for (let i=0;i<a.length;i++) s+=a[i]*b[i]; return s; }
+    dot(a, b) { return a.reduce((s, x, i) => s + x * b[i], 0); }
 
-    async analyze({historical}) {
-        if (!historical.length) return { modelType:'logisticAI', taiProb:0.5, confidence:0.5, explanation: 'no data' };
-        // ensure we have trained weights - train quickly on current history
-        this.trainOnHistory(historical, 80, 0.06);
-        const latestIdx = historical.length - 1;
-        const features = this.extractFeatures(historical, latestIdx);
+    async analyze({ historical }) {
+        if (!historical.length) return { modelType: 'logisticAI', taiProb: 0.5, confidence: 0.5, explanation: 'no data' };
+        this.trainOnHistory(historical);
+        const features = this.extractFeatures(historical, historical.length - 1);
         if (!this.trained) {
-            // fallback to simple heuristic
-            const taiRatio = historical.slice(-10).filter(x=>x.ket_qua==='Tài').length / Math.max(1, Math.min(10, historical.length));
-            return { modelType:'logisticAI', taiProb: clamp(taiRatio), confidence: 0.6, explanation: 'fallback heuristic' };
+            const taiRatio = historical.slice(-10).filter(x => x.ket_qua === 'Tài').length / Math.max(1, Math.min(10, historical.length));
+            return { modelType: 'logisticAI', taiProb: clamp(taiRatio), confidence: 0.6, explanation: 'fallback heuristic' };
         }
         const raw = this.dot(features, this.w) + this.b;
         const taiProb = clamp(sigmoid(raw));
-        const confidence = clamp(0.6 + Math.abs(taiProb - 0.5));
-        return { modelType:'logisticAI', taiProb, confidence, explanation: `AI logistic raw=${raw.toFixed(3)}` };
+        const confidence = clamp(0.65 + Math.abs(taiProb - 0.5) * 0.7);
+        return { modelType: 'logisticAI', taiProb, confidence, explanation: `AI logistic raw=${raw.toFixed(3)}` };
     }
 }
 
-// --- Ensemble manager ---
+// --- Enhanced Ensemble Manager ---
 class AdvancedTaiXiuPredictor {
     constructor() {
         this.models = {
@@ -281,31 +357,31 @@ class AdvancedTaiXiuPredictor {
             quantumInspired: new QuantumInspiredNetwork(),
             temporalFusion: new TemporalFusionPredictor(),
             probabilistic: new AdvancedProbabilisticModel(),
-            logisticAI: new LogisticRegressionPredictor()
+            logisticAI: new LogisticRegressionPredictor(),
+            transformer: new TransformerPredictor()
         };
-        // default weights (sum not necessarily 1)
         this.config = {
             ensembleWeights: {
-                deepSequence: 0.25,
-                hybridAttention: 0.18,
+                deepSequence: 0.2,
+                hybridAttention: 0.15,
                 quantumInspired: 0.15,
-                temporalFusion: 0.12,
-                probabilistic: 0.10,
-                logisticAI: 0.20
+                temporalFusion: 0.1,
+                probabilistic: 0.1,
+                logisticAI: 0.2,
+                transformer: 0.25
             },
-            minRecords: 30,
-            tuningWindow: 200
+            minRecords: 20,
+            tuningWindow: 300
         };
         this.historicalData = [];
         this.predictionHistory = [];
         this.tong_so_phien_du_doan = 0;
-        // For smoothing weights update
-        this.alpha = 0.2;
+        this.alpha = 0.15;
     }
 
     async updateData(newData) {
         this.historicalData = newData;
-        return {len: this.historicalData.length};
+        return { len: this.historicalData.length };
     }
 
     async analyzeAll() {
@@ -314,11 +390,10 @@ class AdvancedTaiXiuPredictor {
                 const r = await model.analyze({ historical: this.historicalData });
                 return { name, ...r };
             } catch (e) {
-                return { name, modelType: name, taiProb:0.5, confidence:0.5, explanation: 'error' };
+                return { name, modelType: name, taiProb: 0.5, confidence: 0.5, explanation: 'error' };
             }
         });
-        const results = await Promise.all(tasks);
-        return results;
+        return await Promise.all(tasks);
     }
 
     smartEnsemblePrediction(analysisResults) {
@@ -328,23 +403,21 @@ class AdvancedTaiXiuPredictor {
         const details = {};
         for (const a of analysisResults) {
             const w = weights[a.name] ?? 0;
-            totalWeight += w;
-            combinedTai += (a.taiProb * w);
+            totalWeight += w * a.confidence; // Weight by confidence
+            combinedTai += (a.taiProb * w * a.confidence);
             details[a.name] = { taiProb: a.taiProb, confidence: a.confidence, explanation: a.explanation };
         }
         const taiProb = clamp(combinedTai / Math.max(totalWeight, 1));
         const xiuProb = clamp(1 - taiProb);
-        // confidence estimate: distance from 0.5 scaled by average confidences
         const avgConf = mean(analysisResults.map(r => r.confidence || 0.6));
-        const confidence = Math.round(clamp((Math.abs(taiProb - 0.5) * 2) * avgConf, 0.05, 0.99) * 10000) / 100; // percent with 2 decimals
-        // risk: entropy-like
+        const confidence = Math.round(clamp((Math.abs(taiProb - 0.5) * 2) * avgConf, 0.05, 0.99) * 10000) / 100;
         const entropy = - (taiProb * Math.log2(taiProb) + xiuProb * Math.log2(xiuProb));
         let risk = 'Trung bình';
         if (entropy < 0.6) risk = 'Thấp';
         else if (entropy > 0.95) risk = 'Cao';
 
         const finalPrediction = taiProb > 0.5 ? 'Tài' : 'Xỉu';
-        let explanation = `Tổng hợp: P(Tài)=${(taiProb*100).toFixed(2)}% — Dự đoán ${finalPrediction} với độ tin cậy ${confidence}%.`;
+        let explanation = `Tổng hợp: P(Tài)=${(taiProb * 100).toFixed(2)}% — Dự đoán ${finalPrediction} với độ tin cậy ${confidence}%.`;
         explanation += '\nChi tiết mô hình:\n';
         for (const k in details) explanation += `- ${k}: ${details[k].explanation}\n`;
 
@@ -359,7 +432,6 @@ class AdvancedTaiXiuPredictor {
         const analysisResults = await this.analyzeAll();
         const ens = this.smartEnsemblePrediction(analysisResults);
 
-        // save history
         const lastPhien = this.historicalData[this.historicalData.length - 1].phien;
         this.tong_so_phien_du_doan++;
         this.predictionHistory.push({
@@ -392,21 +464,20 @@ class AdvancedTaiXiuPredictor {
         return this.predictionHistory.slice(-limit);
     }
 
-    // backtest last N records and compute model-wise accuracy, then adjust weights
-    async backtestAndTune(window = 200) {
+    async backtestAndTune(window = 300) {
         const hist = this.historicalData;
         if (hist.length < 20) return { error: 'Need more data to backtest' };
         const start = Math.max(10, hist.length - window - 1);
         const modelAcc = {};
         for (const key of Object.keys(this.models)) modelAcc[key] = { correct: 0, total: 0 };
 
-        // rolling simulate: for i from start+10 .. hist.length-1, predict using history[0..i-1]
         for (let i = start + 10; i < hist.length; i++) {
-            const chunk = hist.slice(0, i); // training history available up to i-1
-            // compute each model's prediction probability using chunk
+            const chunk = hist.slice(0, i);
             for (const [name, model] of Object.entries(this.models)) {
                 try {
-                    // For logisticAI, train on chunk inside analyze
+                    if (name === 'transformer' || name === 'logisticAI') {
+                        await model.trainOnHistory(chunk);
+                    }
                     const res = await model.analyze({ historical: chunk });
                     const pred = res.taiProb > 0.5 ? 'Tài' : 'Xỉu';
                     const actual = hist[i].ket_qua;
@@ -418,7 +489,6 @@ class AdvancedTaiXiuPredictor {
             }
         }
 
-        // compute accuracies and update weights proportionally (with smoothing)
         const accuracies = {};
         let sumAcc = 0;
         for (const k in modelAcc) {
@@ -426,17 +496,14 @@ class AdvancedTaiXiuPredictor {
             accuracies[k] = acc;
             sumAcc += acc;
         }
-        // update weights: new = (1-alpha)*old + alpha*(acc / sumAcc)
         const newWeights = {};
         const oldWeights = this.config.ensembleWeights;
         for (const k in oldWeights) {
             const acc = accuracies[k] || 0.01;
             const normalized = (sumAcc > 0) ? (acc / sumAcc) : (1 / Object.keys(oldWeights).length);
             newWeights[k] = oldWeights[k] * (1 - this.alpha) + normalized * this.alpha * Object.keys(oldWeights).length;
-            // ensure positive
             if (!isFinite(newWeights[k]) || newWeights[k] <= 0) newWeights[k] = 0.01;
         }
-        // normalize scale (optional)
         this.config.ensembleWeights = newWeights;
 
         return { accuracies, newWeights, modelAcc };
@@ -453,10 +520,8 @@ app.get('/api/taixiu/predict', async (req, res) => {
         const processed = processApiData(data);
         if (!processed.length) return res.status(500).json({ error: 'No usable historical records from source.' });
         await advancedPredictor.updateData(processed);
-        // use minRecords default (config)
         const result = await advancedPredictor.predict();
-        // attach last session info
-        const last = processed[processed.length-1];
+        const last = processed[processed.length - 1];
         res.json({
             phien: last.phien,
             xuc_xac: last.xuc_xac,
@@ -472,14 +537,14 @@ app.get('/api/taixiu/predict', async (req, res) => {
 });
 
 app.get('/api/taixiu/premium', async (req, res) => {
-    // same as predict but allow smaller minRecords if premium param set
     try {
         const src = req.query.src || 'https://fullsrc-daynesun.onrender.com/api/taixiu/history';
-        const minRecords = Number(req.query.minRecords) || 40;
+        const minRecords = Number(req.query.minRecords) || 20;
         const { data } = await axios.get(src, { timeout: 8000 });
         const processed = processApiData(data);
         if (processed.length < minRecords) return res.status(400).json({ error: `Not enough data. Need >= ${minRecords} records.` });
         await advancedPredictor.updateData(processed);
+        await advancedPredictor.backtestAndTune(300); // Auto-tune weights
         const result = await advancedPredictor.predict(minRecords);
         const last = processed[processed.length - 1];
         res.json({
@@ -522,7 +587,6 @@ app.get('/api/taixiu/history', (req, res) => {
     }
 });
 
-// small helper to mark latest prediction actual (POST {actual: "Tài" or "Xỉu"})
 app.post('/api/taixiu/update-actual', (req, res) => {
     try {
         const { actual } = req.body;
@@ -534,12 +598,11 @@ app.post('/api/taixiu/update-actual', (req, res) => {
     }
 });
 
-// Root - info
 app.get('/', (req, res) => {
-    res.send(`<pre>Advanced TaiXiu Predictor server.
+    res.send(`<pre>Advanced TaiXiu Predictor server (VIP Edition).
 Endpoints:
 GET /api/taixiu/predict
-GET /api/taixiu/premium?minRecords=40
+GET /api/taixiu/premium?minRecords=20
 GET /api/taixiu/backtest
 GET /api/taixiu/history
 POST /api/taixiu/update-actual  { actual: "Tài" }
