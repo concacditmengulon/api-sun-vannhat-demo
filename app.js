@@ -1,259 +1,302 @@
-const express = require('express');
-const axios = require('axios');
-const app = express();
-const PORT = process.env.PORT || 3000;
+// server.js
+import express from "express";
+import axios from "axios";
+import cors from "cors";
 
-// Middleware
+const app = express();
+app.use(cors());
 app.use(express.json());
 
-// --- Start of AdvancedTaiXiuPredictor Class ---
-// Các mô hình con đã được mô phỏng để hoạt động trong môi trường Node.js.
-// Trong thực tế, các mô hình này sẽ là các mô hình học máy phức tạp.
-class DeepSequencePredictor {
-    async analyze(data) {
-        const history = data.historical.map(item => item.ket_qua);
-        const lastSequence = history.slice(-5).join('');
-        
-        let prediction = 'Tài';
-        let confidence = 85 + Math.random() * 5;
-        let explanation = "Phân tích chuỗi sâu cho thấy sự lặp lại của các mẫu phức tạp gần đây. Mô hình nhận diện một mô hình chuỗi đặc biệt và dự đoán dựa trên xu hướng này.";
-        
-        // Mô phỏng logic phân tích chuỗi
-        if (lastSequence.includes('TTT')) {
-            prediction = 'Tài';
-            confidence = 92;
-            explanation = "Mô hình nhận thấy cầu bệt Tài đang diễn ra với chuỗi TTT. Khả năng cao cầu sẽ tiếp tục.";
-        } else if (lastSequence.includes('XXX')) {
-            prediction = 'Xỉu';
-            confidence = 92;
-            explanation = "Mô hình nhận thấy cầu bệt Xỉu đang diễn ra với chuỗi XXX. Khả năng cao cầu sẽ tiếp tục.";
-        } else if (lastSequence === 'TX' || lastSequence === 'XT') {
-            prediction = lastSequence === 'TX' ? 'Xỉu' : 'Tài';
-            confidence = 88;
-            explanation = "Mô hình nhận thấy cầu đảo chiều (1-1) đang diễn ra. Dự đoán theo cầu.";
-        } else if (lastSequence.slice(-2) === 'TT' && lastSequence.slice(-3).length > 2) {
-            prediction = 'Xỉu';
-            confidence = 75;
-            explanation = "Cầu bệt Tài vừa kết thúc, mô hình dự đoán sẽ có sự đảo chiều sang Xỉu.";
-        } else if (lastSequence.slice(-2) === 'XX' && lastSequence.slice(-3).length > 2) {
-            prediction = 'Tài';
-            confidence = 75;
-            explanation = "Cầu bệt Xỉu vừa kết thúc, mô hình dự đoán sẽ có sự đảo chiều sang Tài.";
-        }
+const SOURCE_URL = process.env.SOURCE_URL || "https://fullsrc-daynesun.onrender.com/api/taixiu/history";
+const PORT = process.env.PORT || 3000;
 
-        return {
-            prediction,
-            confidence,
-            explanation,
-            modelType: 'deepSequence'
-        };
+// ---------- Utils ----------
+const toResult = (r, total) => {
+  // Chuẩn hoá: trả 'T' cho Tài, 'X' cho Xỉu
+  // Quy ước: nếu API có field result (T/TAI/X/XIU) thì dùng; nếu không dùng tổng:
+  // Tổng >= 11 => T, else X. (Quy chuẩn Tài/Xỉu cơ bản)
+  if (!r && typeof total === "number") {
+    return total >= 11 ? "T" : "X";
+  }
+  if (!r) return null;
+  const s = String(r).toUpperCase();
+  if (s.includes("T")) return "T";
+  if (s.includes("X")) return "X";
+  // nếu có số 1/0
+  if (s === "1") return "T";
+  if (s === "0") return "X";
+  return null;
+};
+
+const normalizeHistory = (raw) => {
+  // Thử map nhiều dạng trả về
+  return raw
+    .map((item) => {
+      // support various keys: session/phien/id ; xuc_xac/dice ; tong/total ; ket_qua/result
+      const session = item.session ?? item.phien ?? item.id ?? item.sid ?? item.phien_truoc ?? null;
+      const dice = item.dice ?? item.xuc_xac ?? item.xucxac ?? item.xs ?? null;
+      const total = Number(item.total ?? item.tong ?? item.sum ?? item.tong_diem ?? item.tong ?? item.tong_diem) || (Array.isArray(dice) ? dice.reduce((a,b) => a + Number(b||0),0) : null);
+      const rawResult = item.result ?? item.ket_qua ?? item.kq ?? item.ketqua ?? null;
+      const result = toResult(rawResult, total);
+      return {
+        raw: item,
+        session,
+        dice,
+        total,
+        result
+      };
+    })
+    .filter(x => x.session !== null && (x.result === "T" || x.result === "X"));
+};
+
+// ---------- Pattern extraction ----------
+const buildPattern = (history, limit = 20) => {
+  const last = history.slice(-limit);
+  return last.map(h => h.result).join("");
+};
+
+// ---------- Transition matrix ----------
+const buildTransition = (history) => {
+  // Count transitions prev -> next
+  const counts = { T: { T: 0, X: 0 }, X: { T: 0, X: 0 } };
+  for (let i = 0; i < history.length - 1; i++) {
+    const a = history[i].result;
+    const b = history[i+1].result;
+    if ((a === "T" || a === "X") && (b === "T" || b === "X")) counts[a][b]++;
+  }
+  const probs = {
+    T_to_T: counts.T.T / Math.max(1, (counts.T.T + counts.T.X)),
+    T_to_X: counts.T.X / Math.max(1, (counts.T.T + counts.T.X)),
+    X_to_T: counts.X.T / Math.max(1, (counts.X.T + counts.X.X)),
+    X_to_X: counts.X.X / Math.max(1, (counts.X.T + counts.X.X)),
+  };
+  return { counts, probs };
+};
+
+// ---------- Simple feature extraction ----------
+const extractFeatures = (history) => {
+  const n = history.length;
+  const last = history.slice(-1)[0];
+  const last5 = history.slice(-5);
+  const last10 = history.slice(-10);
+  const freq = (arr) => {
+    const t = arr.filter(x => x.result === "T").length;
+    const x = arr.filter(x => x.result === "X").length;
+    return { T: t, X: x, pT: t/Math.max(1, arr.length), pX: x/Math.max(1, arr.length) };
+  };
+  const runs = (() => {
+    let maxRun = 0, currRun = 1, currVal = null;
+    for (let i = 0; i < history.length; i++) {
+      if (i === 0) { currVal = history[i].result; currRun = 1; }
+      else {
+        if (history[i].result === currVal) { currRun++; }
+        else { maxRun = Math.max(maxRun, currRun); currVal = history[i].result; currRun = 1; }
+      }
     }
-}
-
-class HybridAttentionPredictor {
-    async analyze(data) {
-        const result = Math.random() > 0.5 ? 'Tài' : 'Xỉu';
-        const confidence = 80 + Math.random() * 10;
-        const explanation = "Hệ thống tập trung vào cả yếu tố thời gian và đặc trưng. Mô hình nhận thấy sự tương quan mạnh mẽ giữa kết quả gần nhất và sự thay đổi đột ngột của tổng điểm, cho thấy một mẫu cầu chuyển hướng.";
-
-        return {
-            prediction: result,
-            confidence,
-            explanation,
-            modelType: 'hybridAttention'
-        };
+    maxRun = Math.max(maxRun, currRun);
+    // current ongoing run length:
+    let ongoing = 1;
+    for (let i = history.length - 1; i > 0; i--) {
+      if (history[i].result === history[i-1].result) ongoing++;
+      else break;
     }
-}
+    return { maxRun, ongoing, last: history.length>0?history[history.length-1].result:null };
+  })();
 
-class QuantumInspiredNetwork {
-    async analyze(data) {
-        const result = Math.random() > 0.5 ? 'Tài' : 'Xỉu';
-        const confidence = 90 + Math.random() * 5;
-        const explanation = "Mô hình lượng tử phân tích sự chồng chập của nhiều kết quả tiềm năng và tính toán xác suất sụp đổ cao nhất. Mô hình này đang nghiêng về một mô hình cầu đối xứng, rất hiếm gặp.";
+  return {
+    n,
+    lastResult: last ? last.result : null,
+    freq5: freq(last5),
+    freq10: freq(last10),
+    freqAll: freq(history),
+    runs
+  };
+};
 
-        return {
-            prediction: result,
-            confidence,
-            explanation,
-            modelType: 'quantumInspired'
-        };
+// ---------- Deterministic ensemble predictor ----------
+const deterministicPredict = (history) => {
+  // Require some minimum history
+  if (history.length < 8) {
+    // fallback deterministic: use recent majority
+    const f = extractFeatures(history);
+    const guess = f.freqAll.pT >= 0.5 ? "T" : "X";
+    return { guess, score: Math.max(f.freqAll.pT, f.freqAll.pX), explanation: "Thiếu dữ liệu: dùng tỷ lệ toàn bộ lịch sử." };
+  }
+
+  const trans = buildTransition(history);
+  const feat = extractFeatures(history);
+  const pattern = buildPattern(history, 20);
+
+  // Heuristics (deterministic):
+  // 1) Markov: P(next = T | last) from trans.probs
+  const last = feat.lastResult;
+  const p_markov_T = last === "T" ? trans.probs.T_to_T : trans.probs.X_to_T;
+  const p_markov_X = 1 - p_markov_T;
+
+  // 2) Recent frequency: proportion in last 5 and last 10
+  const p_recent_T = 0.6 * feat.freq5.pT + 0.4 * feat.freq10.pT;
+  const p_recent_X = 1 - p_recent_T;
+
+  // 3) Run bias: if ongoing run length >=3, bias to flip (simple contrarian heuristic)
+  let p_run_T = 0.5;
+  if (feat.runs.ongoing >= 3) {
+    // If current run is TTT -> bias towards X (flip)
+    p_run_T = feat.runs.last === "T" ? 0.22 : 0.78;
+  }
+
+  // 4) Pattern match: if we find specific repeating pattern that historically preceded flips, boost accordingly
+  // Deterministic: search last 6 pattern occurrences and check next-result frequency
+  const patternBoost = (() => {
+    const seq = history.map(h => h.result).join("");
+    const window = 6;
+    const target = seq.slice(-window);
+    if (target.length < 3) return 0.5;
+    // count occurrences of target in seq (excluding last occurrence), and of what followed them
+    let count = 0, followedT = 0;
+    for (let i = 0; i + target.length < seq.length - target.length; i++) {
+      if (seq.slice(i, i + target.length) === target) {
+        count++;
+        const nextChar = seq[i + target.length];
+        if (nextChar === "T") followedT++;
+      }
     }
-}
+    if (count === 0) return 0.5;
+    return followedT / count;
+  })();
 
-class AdvancedProbabilisticModel {
-    async analyze(data) {
-        const result = Math.random() > 0.5 ? 'Tài' : 'Xỉu';
-        const confidence = 75 + Math.random() * 15;
-        const explanation = "Mô hình xác suất đánh giá tần suất của các mẫu trước đó và tính toán xác suất xuất hiện của kết quả tiếp theo. Cầu hiện tại là cầu bệt, nhưng xác suất gãy cầu đang tăng dần.";
-        
-        return {
-            prediction: result,
-            confidence,
-            explanation,
-            modelType: 'probabilisticGraphical'
-        };
+  // 5) Parity/total heuristic if totals provided — if last total exists and is extreme pushes to certain side
+  const lastTotal = history.slice(-1)[0]?.total ?? null;
+  let p_total_T = 0.5;
+  if (typeof lastTotal === "number") {
+    // deterministic mapping: totals 4-6/15-17 more extreme -> slightly push
+    if (lastTotal <= 6) p_total_T = 0.35;
+    else if (lastTotal >= 15) p_total_T = 0.65;
+    else p_total_T = lastTotal >= 11 ? 0.6 : 0.4;
+  }
+
+  // Combine with fixed deterministic weights (can be adapted by backtest)
+  const weights = {
+    markov: 0.30,
+    recent: 0.28,
+    run: 0.12,
+    pattern: 0.18,
+    total: 0.12
+  };
+
+  const scoreT = p_markov_T * weights.markov
+               + p_recent_T * weights.recent
+               + p_run_T * weights.run
+               + patternBoost * weights.pattern
+               + p_total_T * weights.total;
+
+  const scoreX = 1 - scoreT;
+  const guess = scoreT >= scoreX ? "T" : "X";
+  const score = Math.max(scoreT, scoreX); // confidence-like internal score (0.5..1)
+
+  // Build explanation deterministically
+  const explanationParts = [];
+  explanationParts.push(`Markov P(T|last="${last}")=${(p_markov_T).toFixed(3)}`);
+  explanationParts.push(`Recent5 pT=${(feat.freq5.pT).toFixed(3)}, Recent10 pT=${(feat.freq10.pT).toFixed(3)}`);
+  explanationParts.push(`Ongoing run=${feat.runs.ongoing} (last=${feat.runs.last}) => run-bias pT=${p_run_T.toFixed(3)}`);
+  explanationParts.push(`Pattern match score=${patternBoost.toFixed(3)}`);
+  if (lastTotal !== null) explanationParts.push(`Last total=${lastTotal} => total-heuristic pT=${p_total_T.toFixed(3)}`);
+
+  return {
+    guess,
+    score: Number(score.toFixed(4)),
+    breakdown: { p_markov_T: Number(p_markov_T.toFixed(4)), p_recent_T: Number(p_recent_T.toFixed(4)), p_run_T: Number(p_run_T.toFixed(4)), patternBoost: Number(patternBoost.toFixed(4)), p_total_T: Number(p_total_T.toFixed(4)) },
+    explanation: explanationParts.join("; ")
+  };
+};
+
+// ---------- Backtest (deterministic simulation) ----------
+const backtestPredictor = (history, maxWindow = 200) => {
+  // We'll do an incremental simulation using only past data up to i to predict i+1
+  const n = history.length;
+  const limit = Math.min(n, maxWindow);
+  if (limit < 12) return { accuracy: null, trials: 0, details: [] };
+
+  const start = n - limit;
+  let correct = 0, trials = 0;
+  const details = [];
+  // For each index i from start .. n-2 predict next using history[0..i]
+  for (let i = start; i < n - 1; i++) {
+    const train = history.slice(0, i + 1); // include i
+    const actualNext = history[i + 1].result;
+    const predObj = deterministicPredict(train);
+    const pred = predObj.guess;
+    trials++;
+    if (pred === actualNext) correct++;
+    details.push({ session: history[i+1].session, predicted: pred, actual: actualNext, score: predObj.score, explanation: predObj.explanation });
+  }
+  const accuracy = trials > 0 ? (correct / trials) : null;
+  return { accuracy: accuracy !== null ? Number(accuracy.toFixed(4)) : null, trials, details };
+};
+
+// ---------- Main endpoint ----------
+app.get("/predict", async (req, res) => {
+  try {
+    const resp = await axios.get(SOURCE_URL, { timeout: 9000 });
+    const raw = resp.data;
+    if (!Array.isArray(raw)) {
+      return res.status(500).json({ error: "Unexpected data format from source API", rawSample: raw?.slice?.(0,3) ?? null });
     }
-}
 
-class TemporalFusionPredictor {
-    async analyze(data) {
-        const result = Math.random() > 0.5 ? 'Tài' : 'Xỉu';
-        const confidence = 88 + Math.random() * 5;
-        const explanation = "Mô hình hợp nhất thời gian phân tích sự phụ thuộc của các phiên. Nó nhận thấy một xu hướng tăng giảm điểm tổng đều đặn và dự đoán kết quả dựa trên chu kỳ này.";
-        
-        return {
-            prediction: result,
-            confidence,
-            explanation,
-            modelType: 'temporalFusion'
-        };
-    }
-}
+    const history = normalizeHistory(raw);
+    if (history.length === 0) return res.status(500).json({ error: "No usable history entries found (result normalization failed)." });
 
-class AdvancedTaiXiuPredictor {
-    constructor() {
-        this.models = {
-            deepSequenceModel: new DeepSequencePredictor(),
-            hybridAttentionModel: new HybridAttentionPredictor(),
-            quantumInspiredNetwork: new QuantumInspiredNetwork(),
-            temporalFusionModel: new TemporalFusionPredictor(),
-            probabilisticGraphicalModel: new AdvancedProbabilisticModel()
-        };
-        this.config = {
-            ensembleWeights: {
-                deepSequenceModel: 0.28,
-                hybridAttentionModel: 0.25,
-                quantumInspiredNetwork: 0.22,
-                temporalFusionModel: 0.15,
-                probabilisticGraphicalModel: 0.10
-            },
-            predictionThreshold: 0.72
-        };
-        this.historicalData = [];
-    }
+    // compute basic last entry
+    const lastEntry = history[history.length - 1];
+    const phien = lastEntry.session;
+    const xuc_xac = lastEntry.dice ?? null;
+    const tong = typeof lastEntry.total === "number" ? lastEntry.total : null;
+    const ket_qua = lastEntry.result; // T or X
+    const phien_sau = (typeof phien === "number") ? phien + 1 : String(phien) + "+1";
 
-    async updateData(newData) {
-        this.historicalData = newData;
-        console.log(`Updated historical data with ${newData.length} records.`);
-    }
+    // pattern (last 20)
+    const pattern = buildPattern(history, 20);
 
-    async predict() {
-        if (!this.historicalData || this.historicalData.length < 50) {
-            throw new Error("Insufficient data for reliable prediction. At least 50 records required.");
-        }
+    // Deterministic prediction
+    const pred = deterministicPredict(history);
 
-        const analysisPromises = Object.entries(this.models).map(async ([name, model]) => {
-            return { name, result: await model.analyze({ historical: this.historicalData }) };
-        });
-        const analysisResults = await Promise.all(analysisPromises);
+    // Backtest to compute do_tin_cay
+    const bt = backtestPredictor(history, 300);
+    const do_tin_cay = bt.accuracy !== null ? Number(bt.accuracy.toFixed(4)) : null;
 
-        const { finalPrediction, confidence, explanation, risk } = this.smartEnsemblePrediction(analysisResults);
+    // Compose giai_thich (explain)
+    const giai_thich = [
+      `Dự đoán dựa trên ensemble: markov + recent freq + run-bias + pattern-matching + total-heuristic.`,
+      `Breakdown nội bộ: ${JSON.stringify(pred.breakdown)}`,
+      `Backtest trên ${bt.trials} phiên gần nhất => accuracy=${do_tin_cay}`,
+      `Pattern(20): ${pattern}`
+    ].join(" | ");
 
-        return {
-            du_doan: finalPrediction,
-            do_tin_cay: confidence,
-            giai_thich: explanation,
-            rui_ro: risk
-        };
-    }
+    const response = {
+      phien,
+      xuc_xac,
+      tong,
+      ket_qua,
+      phien_sau,
+      du_doan: pred.guess,
+      do_tin_cay,
+      pattern,
+      giai_thich,
+      internal: {
+        score: pred.score,
+        explanation: pred.explanation,
+        backtestDetailsCount: bt.details.length
+      }
+    };
 
-    smartEnsemblePrediction(analysisResults) {
-        let taiConfidence = 0;
-        let xiuConfidence = 0;
-        let explanationDetails = {};
-        const totalWeight = Object.values(this.config.ensembleWeights).reduce((a, b) => a + b, 0);
-
-        for (const analysis of analysisResults) {
-            const weight = this.config.ensembleWeights[analysis.name];
-
-            if (analysis.result.prediction === 'Tài') {
-                taiConfidence += (analysis.result.confidence / 100) * weight;
-            } else {
-                xiuConfidence += (analysis.result.confidence / 100) * weight;
-            }
-            explanationDetails[analysis.name] = analysis.result.explanation;
-        }
-
-        const taiProb = taiConfidence / totalWeight;
-        const xiuProb = xiuConfidence / totalWeight;
-
-        let finalPrediction = taiProb > xiuProb ? 'Tài' : 'Xỉu';
-        let confidence = (Math.max(taiProb, xiuProb) * 100).toFixed(2);
-
-        let explanation = "Phân tích đa chiều dựa trên các mô hình AI tiên tiến:\n";
-        for (const model in explanationDetails) {
-            explanation += `- **${model.replace('Model', '')}**: ${explanationDetails[model]}\n`;
-        }
-        explanation += `\n**Tóm tắt**: Hệ thống tổng hợp nhận thấy sự đồng thuận cao từ các mô hình, đặc biệt là Mô hình Lượng tử và Mô hình Chuỗi Sâu, chỉ ra một mẫu cầu đặc biệt đang hình thành. Dựa trên phân tích này, dự đoán cho phiên tiếp theo là **${finalPrediction}**.`;
-        
-        let risk = "Trung bình";
-        if (confidence >= 95) {
-            risk = "Thấp";
-            explanation += `\n**Mẫu cầu đặc biệt**: Mẫu cầu hiện tại là **${finalPrediction === 'Tài' ? 'cầu bệt Tài' : 'cầu bệt Xỉu'}** có độ ổn định cao, hiếm khi xuất hiện. Khả năng gãy cầu rất thấp.`;
-        } else if (confidence < 80) {
-            risk = "Cao";
-            explanation += `\n**Lưu ý**: Các mô hình có sự bất đồng quan điểm. Cầu đang **đảo chiều** liên tục, gây khó khăn cho việc phân tích. Khuyến nghị chỉ vào tiền nhỏ hoặc đứng ngoài để quan sát.`;
-        }
-
-        return {
-            finalPrediction,
-            confidence,
-            explanation,
-            risk
-        };
-    }
-}
-// --- End of AdvancedTaiXiuPredictor Class ---
-
-const advancedPredictor = new AdvancedTaiXiuPredictor();
-
-// Route API
-app.get('/api/taixiu/predict', async (req, res) => {
-    try {
-        const response = await axios.get('https://fullsrc-daynesun.onrender.com/api/taixiu/history');
-        const historyData = response.data;
-        
-        if (!historyData || historyData.length === 0) {
-            return res.status(500).json({ error: "Không thể lấy dữ liệu lịch sử từ API gốc." });
-        }
-
-        const processedData = historyData.map(item => ({
-            phien: item.session,
-            tong: item.total,
-            ket_qua: item.result,
-            xuc_xac: item.dice
-        }));
-        await advancedPredictor.updateData(processedData);
-
-        const lastSession = processedData[0];
-        const phien = lastSession.phien;
-        const xuc_xac = lastSession.xuc_xac;
-        const tong = lastSession.tong;
-        const ket_qua = lastSession.ket_qua;
-        const phien_sau = phien + 1;
-
-        const predictionResult = await advancedPredictor.predict();
-
-        const finalResult = {
-            phien,
-            xuc_xac,
-            tong,
-            ket_qua,
-            phien_sau,
-            du_doan: predictionResult.du_doan,
-            do_tin_cay: predictionResult.do_tin_cay,
-            giai_thich: predictionResult.giai_thich,
-            rui_ro: predictionResult.rui_ro
-        };
-
-        res.json(finalResult);
-
-    } catch (error) {
-        console.error("API error:", error);
-        res.status(500).json({ error: error.message || "Đã xảy ra lỗi trong quá trình xử lý." });
-    }
+    return res.json(response);
+  } catch (err) {
+    console.error("Predict error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to fetch or process source API", detail: err?.message || String(err) });
+  }
 });
 
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+app.get("/", (req, res) => {
+  res.json({ ok: true, info: "ĐẦU BUỒI TOOL API IB @ADM_VANNHAT" });
 });
+
+app.listen(PORT, () => console.log(`TaiXiu predictor running on port ${PORT}`));
