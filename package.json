@@ -1,27 +1,21 @@
 {
-  "name": "taixiu-predictor-api",
+  "name": "taixiu-api",
   "version": "1.0.0",
-  "description": "API to predict Tài Xỉu based on advanced heuristics and backtesting.",
+  "description": "API dự đoán Tài Xỉu",
   "main": "app.js",
-  "type": "module",
   "scripts": {
     "start": "node app.js"
   },
-  "dependencies": {
-    "axios": "^1.7.2",
-    "cors": "^2.8.5",
-    "express": "^4.19.2"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  },
   "keywords": [
     "taixiu",
-    "predict",
     "api",
-    "nodejs",
-    "render"
+    "node.js",
+    "express"
   ],
-  "author": "daynesun",
-  "license": "MIT"
+  "author": "Your Name",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.6.8",
+    "express": "^4.19.2"
+  }
 }
