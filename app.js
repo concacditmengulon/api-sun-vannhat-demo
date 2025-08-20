@@ -1,37 +1,9 @@
 const express = require('express');
 const axios = require('axios');
-const mongoose = require('mongoose');
-const redis = require('redis');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Middleware
-app.use(express.json());
-
-// MongoDB Setup
-mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/taixiu', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-});
-const sessionSchema = new mongoose.Schema({
-  sid: Number,
-  d1: Number,
-  d2: Number,
-  d3: Number,
-  total: Number,
-  result: String,
-  pattern: String,
-  timestamp: Number,
-});
-const Session = mongoose.model('Session', sessionSchema);
-
-// Redis Setup
-const redisClient = redis.createClient({
-  url: process.env.REDIS_URI || 'redis://localhost:6379',
-});
-redisClient.connect().catch(console.error);
-
-// Helper Functions
+// Helper Functions (from provided code)
 function calculateStdDev(arr) {
   if (arr.length < 2) return 0;
   const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
@@ -54,13 +26,29 @@ function getDiceFrequencies(history, limit) {
   return diceFreq;
 }
 
-// Pattern Data
+// Pattern Data for Logic 24 (from provided code)
 const PATTERN_DATA = {
   "ttxttx": { tai: 80, xiu: 20 }, "xxttxx": { tai: 25, xiu: 75 },
-  // ... (as provided)
+  "ttxxtt": { tai: 75, xiu: 25 }, "txtxt": { tai: 60, xiu: 40 },
+  "xtxtx": { tai: 40, xiu: 60 }, "ttx": { tai: 70, xiu: 30 },
+  "xxt": { tai: 30, xiu: 70 }, "txt": { tai: 65, xiu: 35 },
+  "xtx": { tai: 35, xiu: 65 }, "tttt": { tai: 85, xiu: 15 },
+  "xxxx": { tai: 15, xiu: 85 }, "ttttt": { tai: 88, xiu: 12 },
+  "xxxxx": { tai: 12, xiu: 88 }, "tttttt": { tai: 92, xiu: 8 },
+  "xxxxxx": { tai: 8, xiu: 92 }, "tttx": { tai: 75, xiu: 25 },
+  "xxxt": { tai: 25, xiu: 75 }, "ttxtx": { tai: 78, xiu: 22 },
+  "xxtxt": { tai: 22, xiu: 78 }, "txtxtx": { tai: 82, xiu: 18 },
+  "xtxtxt": { tai: 18, xiu: 82 }, "ttxtxt": { tai: 85, xiu: 15 },
+  "xxtxtx": { tai: 15, xiu: 85 }, "txtxxt": { tai: 83, xiu: 17 },
+  "xtxttx": { tai: 17, xiu: 83 }, "ttttttt": { tai: 95, xiu: 5 },
+  "xxxxxxx": { tai: 5, xiu: 95 }, "tttttttt": { tai: 97, xiu: 3 },
+  "xxxxxxxx": { tai: 3, xiu: 97 }, "txtx": { tai: 60, xiu: 40 },
+  "xtxt": { tai: 40, xiu: 60 }, "txtxt": { tai: 65, xiu: 35 },
+  "xtxtx": { tai: 35, xiu: 65 }, "txtxtxt": { tai: 70, xiu: 30 },
+  "xtxtxtx": { tai: 30, xiu: 70 }
 };
 
-// Prediction Logics
+// Prediction Logics (from provided code, abbreviated for brevity)
 function predictLogic1(lastSession, history) {
   if (!lastSession || history.length < 10) return null;
   const lastDigitOfSession = lastSession.sid % 10;
@@ -88,14 +76,13 @@ function predictLogic1(lastSession, history) {
   return null;
 }
 
-// Assume predictLogic2 to predictLogic24 are included...
+// Include other predictLogic functions (2-24) here as provided...
 
-// Enhanced predictLogic20
+// Modified predictLogic20 for confidence scoring
 async function predictLogic20(history, logicPerformance, cauLogData) {
-  if (history.length < 30) return { prediction: null, confidence: 0, votes: {} };
+  if (history.length < 30) return { prediction: null, confidence: 0 };
   let taiVotes = 0;
   let xiuVotes = 0;
-  const voteDetails = {};
   const signals = [
     { logic: 'logic1', baseWeight: 0.8 },
     { logic: 'logic2', baseWeight: 0.7 },
@@ -127,7 +114,25 @@ async function predictLogic20(history, logicPerformance, cauLogData) {
     logic1: predictLogic1(lastSession, history),
     logic2: predictLogic2(nextSessionId, history),
     logic3: predictLogic3(history),
-    // ... (include all logic functions)
+    logic4: predictLogic4(history),
+    logic5: predictLogic5(history),
+    logic6: predictLogic6(lastSession, history),
+    logic7: predictLogic7(history),
+    logic8: predictLogic8(history),
+    logic9: predictLogic9(history),
+    logic10: predictLogic10(history),
+    logic11: predictLogic11(history),
+    logic12: predictLogic12(lastSession, history),
+    logic13: predictLogic13(history),
+    logic14: predictLogic14(history),
+    logic15: predictLogic15(history),
+    logic16: predictLogic16(history),
+    logic17: predictLogic17(history),
+    logic18: predictLogic18(history),
+    logic19: predictLogic19(history),
+    logic21: predictLogic21(history),
+    logic22: predictLogic22(history, cauLogData),
+    logic23: predictLogic23(history),
     logic24: predictLogic24(history),
   };
   let totalWeightedVotes = 0;
@@ -136,10 +141,7 @@ async function predictLogic20(history, logicPerformance, cauLogData) {
     if (prediction !== null) {
       const acc = logicPerformance[signal.logic]?.accuracy || 0.5;
       const consistency = logicPerformance[signal.logic]?.consistency || 0.5;
-      // Dynamic weighting based on recent performance
-      const performanceFactor = Math.max(0.5, Math.min(1.5, (acc + consistency) / 2));
-      const effectiveWeight = signal.baseWeight * performanceFactor;
-      voteDetails[signal.logic] = { prediction, weight: effectiveWeight };
+      const effectiveWeight = signal.baseWeight * ((acc + consistency) / 2);
       if (prediction === "Tài") {
         taiVotes += effectiveWeight;
       } else {
@@ -148,7 +150,6 @@ async function predictLogic20(history, logicPerformance, cauLogData) {
       totalWeightedVotes += effectiveWeight;
     }
   });
-  // Pattern-based boosting
   const currentPatterns = analyzeAndExtractPatterns(history.slice(0, Math.min(history.length, 50)));
   let cauTaiBoost = 0;
   let cauXiuBoost = 0;
@@ -175,6 +176,31 @@ async function predictLogic20(history, logicPerformance, cauLogData) {
             });
           }
         });
+      } else if (currentPatternValue && typeof currentPatternValue === 'object' && currentPatternValue.result && currentPatternValue.length) {
+        const patternKey = `last_streak_${currentPatternValue.result}_${currentPatternValue.length}`;
+        recentCauLogs.forEach(logEntry => {
+          if (logEntry.patterns && logEntry.patterns.last_streak) {
+            const logStreak = logEntry.patterns.last_streak;
+            if (logStreak.result === currentPatternValue.result && logStreak.length === currentPatternValue.length) {
+              if (!patternMatchScores[patternKey]) {
+                patternMatchScores[patternKey] = { tai: 0, xiu: 0 };
+              }
+              if (logEntry.actual_result === "Tài") patternMatchScores[patternKey].tai++;
+              else patternMatchScores[patternKey].xiu++;
+            }
+          }
+        });
+      } else if (currentPatternValue) {
+        const patternKey = `${patternType}_${currentPatternValue}`;
+        recentCauLogs.forEach(logEntry => {
+          if (logEntry.patterns && logEntry.patterns[patternType] === currentPatternValue) {
+            if (!patternMatchScores[patternKey]) {
+              patternMatchScores[patternKey] = { tai: 0, xiu: 0 };
+            }
+            if (logEntry.actual_result === "Tài") patternMatchScores[patternKey].tai++;
+            else patternMatchScores[patternKey].xiu++;
+          }
+        });
       }
     }
     for (const key in patternMatchScores) {
@@ -195,158 +221,75 @@ async function predictLogic20(history, logicPerformance, cauLogData) {
   taiVotes += cauTaiBoost * 2;
   xiuVotes += cauXiuBoost * 2;
   totalWeightedVotes += (cauTaiBoost + cauXiuBoost) * 2;
+  if (totalWeightedVotes < 1.5) return { prediction: null, confidence: 0 };
   let prediction = null;
   let confidence = 0;
-  if (totalWeightedVotes >= 2.0) {
-    if (taiVotes > xiuVotes * 1.1) {
-      prediction = "Tài";
-      confidence = Math.min(95, Math.round((taiVotes / totalWeightedVotes) * 100));
-    } else if (xiuVotes > taiVotes * 1.1) {
-      prediction = "Xỉu";
-      confidence = Math.min(95, Math.round((xiuVotes / totalWeightedVotes) * 100));
-    }
+  if (taiVotes > xiuVotes * 1.08) {
+    prediction = "Tài";
+    confidence = Math.min(100, Math.round((taiVotes / totalWeightedVotes) * 100));
+  } else if (xiuVotes > taiVotes * 1.08) {
+    prediction = "Xỉu";
+    confidence = Math.min(100, Math.round((xiuVotes / totalWeightedVotes) * 100));
   }
-  return { prediction, confidence, votes: voteDetails };
+  return { prediction, confidence };
 }
 
-// Pattern Analysis
-function analyzeAndExtractPatterns(history) {
-  const patterns = {};
-  if (history.length >= 2) {
-    patterns.sum_sequence_patterns = [
-      { key: `${history[0].total}-${history[0].result === 'Tài' ? 'T' : 'X'}_${history[1]?.total}-${history[1]?.result === 'Tài' ? 'T' : 'X'}` }
-    ];
-  }
-  if (history.length >= 1) {
-    let currentStreakLength = 0;
-    const currentResult = history[0].result;
-    for (let i = 0; i < history.length; i++) {
-      if (history[i].result === currentResult) {
-        currentStreakLength++;
-      } else {
-        break;
-      }
-    }
-    if (currentStreakLength > 0) {
-      patterns.last_streak = { result: currentResult === 'Tài' ? 'T' : 'X', length: currentStreakLength };
-    }
-  }
-  if (history.length >= 3) {
-    const resultsShort = history.slice(0, 3).map(s => s.result === 'Tài' ? 'T' : 'X').join('');
-    if (resultsShort === 'TXT' || resultsShort === 'XTX') {
-      patterns.alternating_pattern = resultsShort;
-    }
-  }
-  return patterns;
-}
-
-// Fetch and Store Historical Data
-async function fetchAndStoreSession() {
+// API Endpoint
+app.get('/api/taixiu/predict', async (req, res) => {
   try {
-    const response = await axios.get('https://fullsrc-daynesun.onrender.com/api/taixiu/sunwin', {
-      timeout: 5000,
-    });
+    // Fetch data from the source API
+    const response = await axios.get('https://fullsrc-daynesun.onrender.com/api/taixiu/sunwin');
     const data = response.data;
+
+    // Validate and transform data
     if (!data || !data.Phien || !data.Xuc_xac_1 || !data.Xuc_xac_2 || !data.Xuc_xac_3 || !data.Tong || !data.Ket_qua || !data.Pattern) {
-      throw new Error('Invalid data from source API');
+      return res.status(400).json({ error: 'Invalid data from source API' });
     }
-    const session = {
+
+    // Prepare history for prediction (single session for now, extendable to multiple)
+    const history = [{
       sid: data.Phien,
       d1: data.Xuc_xac_1,
       d2: data.Xuc_xac_2,
       d3: data.Xuc_xac_3,
       total: data.Tong,
       result: data.Ket_qua,
-      pattern: data.Pattern,
-      timestamp: new Date().getTime(),
-    };
-    await Session.findOneAndUpdate(
-      { sid: session.sid },
-      session,
-      { upsert: true, new: true }
-    );
-    return session;
-  } catch (error) {
-    console.error('Fetch Error:', error.message);
-    return null;
-  }
-}
+      timestamp: new Date().getTime()
+    }];
 
-// API Endpoint
-app.get('/api/taixiu/predict', async (req, res) => {
-  try {
-    // Check Redis cache
-    const cacheKey = `taixiu_predict_${Date.now() - (Date.now() % (5 * 60 * 1000))}`; // Cache for 5 minutes
-    const cached = await redisClient.get(cacheKey);
-    if (cached) {
-      return res.json(JSON.parse(cached));
-    }
-
-    // Fetch latest session
-    const latestSession = await fetchAndStoreSession();
-    if (!latestSession) {
-      return res.status(503).json({ error: 'Unable to fetch latest session' });
-    }
-
-    // Fetch historical data (last 100 sessions)
-    const history = await Session.find()
-      .sort({ sid: -1 })
-      .limit(100)
-      .lean();
-    if (history.length === 0) {
-      return res.status(400).json({ error: 'No historical data available' });
-    }
-
-    // Simulate logicPerformance (in production, calculate from actual data)
-    const logicPerformance = {
-      logic1: { accuracy: 0.6, consistency: 0.5, total: 10 },
-      logic2: { accuracy: 0.65, consistency: 0.55, total: 10 },
-      // ... (add for all logics)
-      logic24: { accuracy: 0.7, consistency: 0.6, total: 10 },
+    // Since we only have one session, we'll use the provided document as the last session
+    const lastSession = {
+      sid: data.Phien,
+      d1: data.Xuc_xac_1,
+      d2: data.Xuc_xac_2,
+      d3: data.Xuc_xac_3,
+      total: data.Tong,
+      result: data.Ket_qua
     };
 
-    // Predict using enhanced logic20
-    const { prediction, confidence, votes } = await predictLogic20(history, logicPerformance, []);
+    // Predict using logic20 (ensemble of all logics)
+    const { prediction, confidence } = await predictLogic20(history, {}, []); // Empty logicPerformance and cauLogData for simplicity
 
-    // Calculate history summary
-    const recentResults = history.slice(0, 10).map(s => s.result === 'Tài' ? 'T' : 'X');
-    const taiCount = recentResults.filter(r => r === 'T').length;
-    const xiuCount = recentResults.filter(r => r === 'X').length;
-    const totalCount = taiCount + xiuCount;
-
+    // Construct response
     const responseData = {
-      Phien_truoc: latestSession.sid,
-      Xuc_xac: `${latestSession.d1} - ${latestSession.d2} - ${latestSession.d3}`,
-      Tong: latestSession.total,
-      Ket_qua: latestSession.result,
-      Phien_sau: latestSession.sid + 1,
+      Phien_truoc: data.Phien,
+      Xuc_xac: `${data.Xuc_xac_1} - ${data.Xuc_xac_2} - ${data.Xuc_xac_3}`,
+      Tong: data.Tong,
+      Ket_qua: data.Ket_qua,
+      Phien_sau: data.Phien + 1,
       Du_doan: prediction || "Không đủ dữ liệu",
       Do_tin_cay: confidence > 0 ? `${confidence}%` : "0%",
-      Pattern: latestSession.pattern,
-      History_Summary: {
-        Recent_Pattern: recentResults.join(''),
-        Tai_Ratio: totalCount > 0 ? Number((taiCount / totalCount).toFixed(2)) : 0,
-        Xiu_Ratio: totalCount > 0 ? Number((xiuCount / totalCount).toFixed(2)) : 0,
-      },
+      Pattern: data.Pattern
     };
-
-    // Cache response
-    await redisClient.setEx(cacheKey, 5 * 60, JSON.stringify(responseData));
-
-    // Log prediction for performance tracking
-    console.log(`Prediction for Phien ${latestSession.sid}: ${prediction} (${confidence}%)`);
 
     res.json(responseData);
   } catch (error) {
-    console.error('API Error:', error.message);
+    console.error('Error:', error.message);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Periodic Data Fetch (every 1 minute)
-setInterval(fetchAndStoreSession, 60 * 1000);
-
-// Start Server
+// Start server
 app.listen(port, () => {
   console.log(`API running on port ${port}`);
 });
